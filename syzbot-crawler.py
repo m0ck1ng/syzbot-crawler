@@ -3,7 +3,6 @@ import requests
 import time
 import os
 import re
-import unicodedata
 import sqlite3
 import datetime
 
@@ -73,7 +72,7 @@ class Cache: # id is link
         filePath = os.path.join(self.dataDir, fileName)
         return open(filePath, 'rb').read()
 
-host = "https://syzkaller.appspot.com"
+host = rb"https://syzkaller.appspot.com"
 proxies = {
      'http': 'socks5://127.0.0.1:7890',
      'https': 'socks5://127.0.0.1:7890'
@@ -85,49 +84,52 @@ bug_pattern = rb'<td class="title">.+?<a href="(.*?)">(.+?)</a>.+?<\/td>.+?<td c
 crash_pattern = rb'<td class="time">(.+?)<\/td>.+?<td class="kernel".*?>.+?<a href=".+?">(.+?)<\/a>.+?<\/td>.+?<td class="repro">.*?<\/td>.+?<td class="repro">.*?<\/td>.*?<td class="repro">(.*?)<\/td>.+?<td class="repro">(.*?)<\/td>'
 
 
-def fetch_data(url, cache, host):
+def fetch_data(url, cache):
     if cache.has(url):
         return cache.getData(url)
 
     print(f"Requesting {url.decode()}")
+    time.sleep(1)
     data = requests.get(url).content
     print(f"Got {url.decode()}")
     cache.add(url, cache.now(), data)
     return data
 
-def extract_repro(repro, host, cache):
+def extract_repro(repro, cache):
     repro_link = re.search(rb'<a href="(.+?)">.+?<\/a>', repro)
     if repro_link:
-        repro_url = host + repro_link.group(1)
-        return fetch_data(repro_url, cache, host)
+        repro_url = host + repro_link.group(1).replace(b'&amp;', b'&')
+        return fetch_data(repro_url, cache)
     return b''
 
-def parse_crashes(data, host, crash_pattern, cache):
+def parse_crashes(data, cache):
+    global crash_pattern
     # crash: tuple (time, kernel_hash, syz_repro_url, c_repro_url)
     crashes = re.findall(crash_pattern, data, re.MULTILINE | re.DOTALL)
     crash_objs = []
 
     for crash in crashes:
-        syz_data = extract_repro(crash[2], host, cache)
-        c_data = extract_repro(crash[3], host, cache)
+        syz_data = extract_repro(crash[2], cache)
+        c_data = extract_repro(crash[3], cache)
         crash_objs.append(list(crash) + [syz_data])
 
     return crash_objs
 
 def get_bugs(main_link):
-    global cache, bug_pattern, host, proxies
+    global cache, bug_pattern
     main_link = main_link.encode() if isinstance(main_link, str) else main_link
-    host = host.encode() if isinstance(host, str) else host
     
-    data = fetch_data(main_link, cache, host)
+    data = fetch_data(main_link, cache)
     # bug: tuple (id, name, repro, cause, fix, count, last, reported)
     bugs = re.findall(bug_pattern, data, re.MULTILINE | re.DOTALL)
 
     bug_objs = []
     for bug in bugs:
         bug_url = host+bug[0]
-        bug_data = fetch_data(bug_url, cache, host)
-        crashes = parse_crashes(bug_data, host, crash_pattern, cache)
+        bug_data = fetch_data(bug_url, cache)
+        if (rb'Too Many Requests' in data):
+            raise AssertionError('Too many requests! Forbidden by Syzbot!')
+        crashes = parse_crashes(bug_data, cache)
 
         bug_obj = MyObj()
         bug_obj.bug = bug
@@ -203,3 +205,7 @@ for link in links:
     save_bugs(bugs)
     # bugs = get_bugs(link + '/fixed')
     # save_bugs(bugs)
+
+# bug_url = rb'https://syzkaller.appspot.com/bug?extid=bb50a872bcd6dacdf184'
+# bug_data = fetch_data(bug_url, cache)
+# crashes = parse_crashes(bug_data, cache)
