@@ -1,13 +1,18 @@
-#!/usr/bin/python3
-import requests
-import time
+#!/usr/bin/env python3
+
+
+from bs4 import BeautifulSoup
 import os
+import requests
 import re
-import sqlite3
+import multiprocessing
+import time
 import datetime
 
-class MyObj:
-    pass
+'''
+Query https://syzkaller.appspot.com/upstream for all bugs against upstream kernel and have "C" and "syz" reproducers
+Save reproducers to text files
+'''
 
 def slugify(value):
     """
@@ -72,140 +77,64 @@ class Cache: # id is link
         filePath = os.path.join(self.dataDir, fileName)
         return open(filePath, 'rb').read()
 
-host = rb"https://syzkaller.appspot.com"
-proxies = {
-     'http': 'socks5://127.0.0.1:7890',
-     'https': 'socks5://127.0.0.1:7890'
-}
-
 cache = Cache('cache', 'cache.txt')
+domain = "https://syzkaller.appspot.com"
 
-bug_pattern = rb'<td class="title">.+?<a href="(.*?)">(.+?)</a>.+?<\/td>.+?<td class="stat">(.*?)<\/td>.+?<td class="bisect_status">(.*?)<\/td>.*?<td class="bisect_status">(.*?)<\/td>.*?<td class="stat ">(.+?)<\/td>.*?<td class="stat">(.+?)<\/td>.*?<td class="stat">.*?<a href="(.*?)">.+?<\/a>.*?<\/td>'
-crash_pattern = rb'<td class="time">(.+?)<\/td>.+?<td class="kernel".*?>.+?<a href=".+?">(.+?)<\/a>.+?<\/td>.+?<td class="repro">.*?<\/td>.+?<td class="repro">.*?<\/td>.*?<td class="repro">(.*?)<\/td>.+?<td class="repro">(.*?)<\/td>'
-
-
-def fetch_data(url, cache):
+def fetch_data(url):
     if cache.has(url):
+        print(f"Find {url} in cache")
         return cache.getData(url)
 
-    print(f"Requesting {url.decode()}")
+    print(f"Requesting {url}")
     time.sleep(1)
     data = requests.get(url).content
-    print(f"Got {url.decode()}")
+    print(f"Got {url}")
     cache.add(url, cache.now(), data)
     return data
 
-def extract_repro(repro, cache):
-    repro_link = re.search(rb'<a href="(.+?)">.+?<\/a>', repro)
-    if repro_link:
-        repro_url = host + repro_link.group(1).replace(b'&amp;', b'&')
-        return fetch_data(repro_url, cache)
-    return b''
-
-def parse_crashes(data, cache):
-    global crash_pattern
-    # crash: tuple (time, kernel_hash, syz_repro_url, c_repro_url)
-    crashes = re.findall(crash_pattern, data, re.MULTILINE | re.DOTALL)
-    crash_objs = []
-
-    for crash in crashes:
-        syz_data = extract_repro(crash[2], cache)
-        c_data = extract_repro(crash[3], cache)
-        crash_objs.append(list(crash) + [syz_data])
-
-    return crash_objs
-
-def get_bugs(main_link):
-    global cache, bug_pattern
-    main_link = main_link.encode() if isinstance(main_link, str) else main_link
-    
-    data = fetch_data(main_link, cache)
-    # bug: tuple (id, name, repro, cause, fix, count, last, reported)
-    bugs = re.findall(bug_pattern, data, re.MULTILINE | re.DOTALL)
-
-    bug_objs = []
+def get_reproducers(bugs):
     for bug in bugs:
-        bug_url = host+bug[0]
-        bug_data = fetch_data(bug_url, cache)
-        if (rb'Too Many Requests' in data):
-            raise AssertionError('Too many requests! Forbidden by Syzbot!')
-        crashes = parse_crashes(bug_data, cache)
+        page = fetch_data(domain + bug)
+        soup = BeautifulSoup(page, 'html.parser')
+        # parse last table in page that has class "list_table"
+        try:
+            table = soup.find_all('table', class_="list_table")[-1]
+        except IndexError:
+            print("No reproducers for bug : ",bug)
+            return
+        # find td that has text "syz", only one
+        td = table.find_all('td', string="syz")
+        for entry in td:
+            # get the href of the link
+            link = entry.find('a').get('href')
+            page = fetch_data(domain + link)
 
-        bug_obj = MyObj()
-        bug_obj.bug = bug
-        bug_obj.crashes = crashes
-        bug_objs.append(bug_obj)
+def get_bugs(url):
+    bugs = []
+    page = fetch_data(url)
+    soup = BeautifulSoup(page, 'html.parser')
+    # parse table rows
+    rows = soup.find_all('tr')
+    for row in rows:
+        # print row with class as "title" and first "stat"
+        title = row.find_all('td', class_="title")
+        stat = row.find_all('td', class_="stat")
+        # if title and stat exist
+        if title and stat:
+            # check if stat[0] contains "C" in "td"
+            if "C" in stat[0] or "syz" in stat[0]:
+                # print(title[0].find('a').get('href'))
+                bugs.append(title[0].find('a').get('href'))
+    return bugs
 
-    return bug_objs
+def main():
+    # Query the page
+    urls = ['https://syzkaller.appspot.com/upstream', 'https://syzkaller.appspot.com/linux-5.15', 'https://syzkaller.appspot.com/linux-6.1']
+    for url in urls:
+        bugs = get_bugs(url)
+        get_reproducers(bugs)
+        bugs = get_bugs(url + '/fixed')
+        get_reproducers(bugs)
 
-
-def connect_db():
-    path = 'syzbot-corpus.db'
-    if os.path.exists(path):
-        conn = sqlite3.connect(path)
-    else:
-        conn = sqlite3.connect(path)
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE bugs (
-                id TEXT NOT NULL PRIMARY KEY,
-                name TEXT,
-                repro TEXT,
-                cause TEXT,
-                fix TEXT,
-                count INTEGER,
-                last TEXT,
-                reported TEXT
-            )
-        """)
-        c.execute("""
-            CREATE TABLE crashes (
-                bug_id TEXT NOT NULL,
-                tdate TEXT NOT NULL,
-                kernel TEXT NOT NULL,
-                syz TEXT,
-                cprog TEXT,
-                syz_data TEXT,
-                PRIMARY KEY (bug_id, tdate, kernel)
-            )
-        """)
-        conn.commit()
-    return conn
-
-
-def save_bugs(bugs):
-    conn = connect_db()
-    c = conn.cursor()
-    for bug_obj in bugs:
-        bug = list(bug_obj.bug)
-        for i in range(len(bug)):
-            bug[i] = bug[i].strip().decode()
-        bug_id = bug[0]
-        c.execute('SELECT * FROM bugs WHERE id=?', (bug_id, ))
-        rows = c.fetchall()
-        if len(rows) == 0:
-            c.execute('INSERT INTO bugs VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (bug[0], bug[1], bug[3] , bug[4], bug[5], bug[6], bug[6], bug[7]))
-        crashes = bug_obj.crashes
-        for crash in crashes:
-            crash = list(crash)
-            for i in range(len(crash)):
-                crash[i] = crash[i].strip().decode()
-            c.execute('SELECT * FROM crashes WHERE bug_id=? AND tdate=? AND kernel=?', (bug_id, crash[1], crash[2]))
-            rows = c.fetchall()
-            if len(rows) == 0:
-                c.execute('INSERT OR IGNORE INTO crashes VALUES(?, ?, ?, ?, ?, ?)', (bug_id, crash[0], crash[1], crash[2], crash[3], crash[4]))
-    conn.commit()
-    conn.close()
-
-# links = ['https://syzkaller.appspot.com/upstream', 'https://syzkaller.appspot.com/linux-5.15', 'https://syzkaller.appspot.com/linux-6.1']
-links = ['https://syzkaller.appspot.com/upstream']
-
-for link in links:
-    bugs = get_bugs(link)
-    save_bugs(bugs)
-    # bugs = get_bugs(link + '/fixed')
-    # save_bugs(bugs)
-
-# bug_url = rb'https://syzkaller.appspot.com/bug?extid=bb50a872bcd6dacdf184'
-# bug_data = fetch_data(bug_url, cache)
-# crashes = parse_crashes(bug_data, cache)
+if __name__ == "__main__":
+    main()
