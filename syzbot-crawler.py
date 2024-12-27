@@ -102,11 +102,11 @@ def get_reproducers(bugs):
         except IndexError:
             print("No reproducers for bug : ",bug)
             return
-        # find td that has text "syz", only one
-        td = table.find_all('td', string="syz")
-        for entry in td:
+        # find a that has text "syz", only one
+        a = table.find_all('a', string="syz")
+        for entry in a:
             # get the href of the link
-            link = entry.find('a').get('href')
+            link = entry.get('href')
             page = fetch_data(domain + link)
 
 def get_bugs(url):
@@ -129,7 +129,11 @@ def get_bugs(url):
 
 def main():
     # Query the page
-    urls = ['https://syzkaller.appspot.com/upstream', 'https://syzkaller.appspot.com/linux-5.15', 'https://syzkaller.appspot.com/linux-6.1']
+    urls = [
+        'https://syzkaller.appspot.com/upstream',
+        'https://syzkaller.appspot.com/linux-5.15',
+        'https://syzkaller.appspot.com/linux-6.1'
+    ]
     for url in urls:
         bugs = get_bugs(url)
         get_reproducers(bugs)
